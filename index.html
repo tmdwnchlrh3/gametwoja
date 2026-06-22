@@ -342,7 +342,13 @@ canvas.sp{width:100%;height:36px;display:block}
 
     <!-- 시세 -->
     <div class="panel on" id="panel-시세">
-      <div class="live-pill"><span class="ldot"></span>실시간</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div class="live-pill" style="margin-bottom:0"><span class="ldot"></span>실시간 KIS</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="lastRefresh" style="font-size:10px;color:var(--txt3)">-</span>
+          <button onclick="refreshPrices()" style="background:var(--card);border:.5px solid var(--bdr);border-radius:6px;padding:4px 9px;color:var(--txt2);font-size:11px;cursor:pointer;display:flex;align-items:center;gap:3px;font-family:var(--fnt)"><i class="ti ti-refresh" style="font-size:13px"></i>새로고침</button>
+        </div>
+      </div>
       <div class="market-banner" id="mktBanner"></div>
       <div class="sec">국내 주식</div>
       <div id="stockList"></div>
@@ -400,17 +406,75 @@ canvas.sp{width:100%;height:36px;display:block}
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script>
-// ── 데이터 ──
-const stocks=[
-  {code:'005930',name:'삼성전자',price:72400,change:1.24,vol:'23.4M',sector:'반도체',cap:'432조'},
-  {code:'000660',name:'SK하이닉스',price:198500,change:2.87,vol:'8.2M',sector:'반도체',cap:'144조'},
-  {code:'373220',name:'LG에너지솔루션',price:312000,change:-0.64,vol:'1.1M',sector:'배터리',cap:'73조'},
-  {code:'207940',name:'삼성바이오로직스',price:876000,change:0.23,vol:'0.4M',sector:'바이오',cap:'58조'},
-  {code:'068270',name:'셀트리온',price:172500,change:-1.42,vol:'2.3M',sector:'바이오',cap:'21조'},
-  {code:'035420',name:'NAVER',price:195000,change:0.78,vol:'1.8M',sector:'IT',cap:'32조'},
-  {code:'009830',name:'한화솔루션',price:28350,change:3.41,vol:'5.6M',sector:'에너지',cap:'6조'},
-  {code:'015760',name:'한국전력',price:22350,change:2.18,vol:'7.4M',sector:'전력',cap:'14조'},
-];
+// ── Render 서버 URL (프로젝트 탭에서 저장한 값 공유) ──
+let SERVER_URL = localStorage.getItem('gam_srv') || '';
+
+// ── 종목 메타 (코드·섹터는 고정, 가격은 KIS API로 덮어씀) ──
+const STOCK_META = {
+  '005930': { name:'삼성전자',   sector:'반도체' },
+  '000660': { name:'SK하이닉스', sector:'반도체' },
+  '373220': { name:'LG에너지솔루션', sector:'배터리' },
+  '207940': { name:'삼성바이오로직스', sector:'바이오' },
+  '068270': { name:'셀트리온',   sector:'바이오' },
+  '035420': { name:'NAVER',      sector:'IT' },
+  '009830': { name:'한화솔루션', sector:'에너지' },
+  '015760': { name:'한국전력',   sector:'전력' },
+};
+const STOCK_CODES = Object.keys(STOCK_META);
+
+// 실시간 데이터가 담길 배열 (초기엔 메타만)
+let stocks = STOCK_CODES.map(code => ({
+  code,
+  ...STOCK_META[code],
+  price: 0, change: 0, changePct: 0,
+  vol: '-', cap: '-', loading: true,
+}));
+
+// ── KIS 시세 불러오기 ──
+async function fetchLivePrices() {
+  if (!SERVER_URL) return; // 서버 URL 없으면 스킵
+
+  try {
+    const codes = STOCK_CODES.join(',');
+    const res = await fetch(`${SERVER_URL}/api/stocks?codes=${codes}`, {
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) throw new Error('서버 응답 오류');
+    const json = await res.json();
+
+    // 받아온 데이터로 stocks 업데이트
+    (json.stocks || []).forEach(s => {
+      const idx = stocks.findIndex(x => x.code === s.code);
+      if (idx === -1 || s.error) return;
+      stocks[idx] = {
+        ...stocks[idx],
+        price:     s.price,
+        change:    s.change,
+        changePct: s.changePct,
+        vol:       s.volume ? (s.volume / 10000).toFixed(1) + '만' : '-',
+        loading:   false,
+      };
+    });
+
+    // 화면 갱신
+    const activePanel = document.getElementById('panel-시세');
+    if (activePanel?.classList.contains('on')) renderStocks();
+    if (document.getElementById('panel-관심')?.classList.contains('on')) renderFavs();
+    renderMarketBanner();
+    updateLastRefresh();
+  } catch (e) {
+    console.warn('시세 조회 실패 (서버 미연결이거나 슬립 상태):', e.message);
+  }
+}
+
+// 마지막 갱신 시각 표시
+function updateLastRefresh() {
+  const el = document.getElementById('lastRefresh');
+  if (el) el.textContent = new Date().toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit', second:'2-digit' });
+}
+
+// ── 데이터 (공시·목표가·뉴스는 그대로) ──
+const stocks_alias = stocks; // 하위 호환
 const disclosures={
   '삼성전자':{
     사업보고서:[['매출액','258.9조 (+5.3%)','pos'],['영업이익','6.57조 (+246%)','pos'],['순이익','4.21조','pos']],
@@ -455,8 +519,6 @@ const portfolio=[
 
 let favs=new Set(['005930','000660']),activeDisc='삼성전자',activeSector='증권사';
 let allTasks=[],taskFilter='전체',serverOk=false;
-let SERVER_URL=localStorage.getItem('gam_srv')||'';
-
 // ── 테마 ──
 function setTheme(t,btn){
   document.body.className=t==='dark'?'':t;
@@ -501,13 +563,17 @@ document.head.appendChild(moreStyle);
 
 // ── 마켓 배너 ──
 function renderMarketBanner(){
-  const kospi=stocks.filter(s=>['005930','000660','015760'].includes(s.code));
-  const avgChg=(kospi.reduce((a,s)=>a+s.change,0)/kospi.length).toFixed(2);
-  const up=avgChg>=0;
+  const loaded=stocks.filter(s=>!s.loading&&s.price>0);
+  const kospiStocks=loaded.filter(s=>['005930','000660','015760'].includes(s.code));
+  const avgChg=kospiStocks.length
+    ? (kospiStocks.reduce((a,s)=>a+(s.changePct??0),0)/kospiStocks.length).toFixed(2)
+    : '0.00';
+  const up=parseFloat(avgChg)>=0;
+  const timeStr=loaded.length>0?'':'로딩중';
   document.getElementById('mktBanner').innerHTML=`
-    <div class="mb-item"><div class="mb-label">KOSPI</div><div class="mb-val ${up?'up':'dn'}">${up?'+':''}${avgChg}%</div></div>
-    <div class="mb-item"><div class="mb-label">KOSDAQ</div><div class="mb-val up">+0.84%</div></div>
-    <div class="mb-item"><div class="mb-label">USD/KRW</div><div class="mb-val dn">1,384</div></div>
+    <div class="mb-item"><div class="mb-label">KOSPI 대표</div><div class="mb-val ${up?'up':'dn'}">${loaded.length?((up?'+':'')+avgChg+'%'):'-'}</div></div>
+    <div class="mb-item"><div class="mb-label">조회 종목</div><div class="mb-val">${loaded.length}/${stocks.length}</div></div>
+    <div class="mb-item"><div class="mb-label">데이터</div><div class="mb-val" style="font-size:11px">${SERVER_URL?'KIS 실시간':'샘플'}</div></div>
   `;
 }
 
@@ -520,9 +586,19 @@ function spark(id,up){
 
 // ── 주식 카드 ──
 function mkCard(s,container){
-  const up=s.change>=0;
+  const pct=s.changePct??s.change;
+  const up=pct>=0;
   const init=s.name.charAt(0);
   const d=document.createElement('div');d.className='scard';
+
+  // 로딩 중일 때 스켈레톤
+  const priceHtml = s.loading
+    ? `<div style="width:70px;height:18px;background:var(--card2);border-radius:4px;animation:blink 1s infinite"></div>`
+    : `<div class="sprice ${up?'up':'dn'}">${s.price.toLocaleString()}</div>`;
+  const chgHtml = s.loading
+    ? `<div style="width:50px;height:12px;background:var(--card2);border-radius:4px;margin-top:4px;animation:blink 1s infinite"></div>`
+    : `<div class="schg ${up?'up':'dn'}">${up?'▲':'▼'} ${Math.abs(pct).toFixed(2)}%</div>`;
+
   d.innerHTML=`
     <div class="scard-top">
       <div class="scard-left">
@@ -530,23 +606,20 @@ function mkCard(s,container){
         <div><div class="sname">${s.name}</div><div class="scode">${s.code} · ${s.sector}</div></div>
       </div>
       <div style="display:flex;align-items:flex-start">
-        <div class="scard-right">
-          <div class="sprice ${up?'up':'dn'}">${s.price.toLocaleString()}</div>
-          <div class="schg ${up?'up':'dn'}">${up?'▲':'▼'} ${Math.abs(s.change).toFixed(2)}%</div>
-        </div>
+        <div class="scard-right">${priceHtml}${chgHtml}</div>
         <button class="scard-star ${favs.has(s.code)?'on':''}" onclick="event.stopPropagation();toggleFav('${s.code}',this)" aria-label="즐겨찾기">
           <i class="ti ${favs.has(s.code)?'ti-star-filled':'ti-star'}"></i>
         </button>
       </div>
     </div>
     <div class="scard-bot">
-      <span class="schip">거래량 ${s.vol}</span>
-      <span class="schip">시총 ${s.cap}</span>
+      <span class="schip">${s.vol!=='-'?'거래량 '+s.vol:SERVER_URL?'조회중...':'샘플데이터'}</span>
+      ${s.cap&&s.cap!=='-'?`<span class="schip">시총 ${s.cap}</span>`:''}
       <div class="spark"><canvas id="sp_${s.code}" width="120" height="36" class="sp"></canvas></div>
     </div>
   `;
   container.appendChild(d);
-  setTimeout(()=>spark('sp_'+s.code,up),60);
+  if(!s.loading) setTimeout(()=>spark('sp_'+s.code,up),60);
 }
 
 function renderStocks(list){
@@ -683,6 +756,8 @@ function saveUrl(){
   const v=(document.getElementById('srvUrl')?.value||'').trim().replace(/\/$/,'');
   if(!v.startsWith('http')){alert('https://로 시작하는 URL을 입력하세요');return;}
   localStorage.setItem('gam_srv',v);SERVER_URL=v;
+  // 시세도 즉시 불러오기
+  fetchLivePrices();
   renderProject();
 }
 async function loadTasks(){
@@ -791,22 +866,38 @@ function renderProject(){
   checkServer();
 }
 
-// ── 실시간 시세 ──
-function liveUpdate(){
-  stocks.forEach(s=>{
-    s.price=Math.max(1000,Math.round(s.price+(Math.random()-.498)*150));
-    s.change=parseFloat((s.change+(Math.random()-.5)*.04).toFixed(2));
-  });
-  if(document.getElementById('panel-시세').classList.contains('on')){
-    renderStocks();renderMarketBanner();
-  }
+// ── 수동 새로고침 ──
+async function refreshPrices(){
+  const btn=document.querySelector('#panel-시세 button');
+  if(btn){btn.style.opacity='.4';btn.style.pointerEvents='none';}
+  await fetchLivePrices();
+  if(btn){btn.style.opacity='';btn.style.pointerEvents='';}
 }
 
 // ── 초기화 ──
 renderMarketBanner();
-renderStocks();
+renderStocks();  // 먼저 로딩 스켈레톤으로 표시
 renderNews();
-setInterval(liveUpdate,4000);
+
+// 서버 URL 있으면 즉시 실시간 시세 불러오기
+if(SERVER_URL){
+  fetchLivePrices();
+  // 30초마다 자동 갱신 (장 시간: 09:00~15:30)
+  setInterval(()=>{
+    const h=new Date().getHours(),m=new Date().getMinutes();
+    const isMarketOpen=(h===9&&m>=0)||(h>9&&h<15)||(h===15&&m<=30);
+    if(isMarketOpen) fetchLivePrices();
+  }, 30000);
+} else {
+  // 서버 URL 없으면 샘플 데이터로 표시
+  stocks.forEach(s=>{
+    s.price=[72400,198500,312000,876000,172500,195000,28350,22350][STOCK_CODES.indexOf(s.code)];
+    s.changePct=[1.24,2.87,-0.64,0.23,-1.42,0.78,3.41,2.18][STOCK_CODES.indexOf(s.code)];
+    s.change=Math.round(s.price*s.changePct/100);
+    s.vol='-';s.loading=false;
+  });
+  renderStocks();renderMarketBanner();
+}
 </script>
 </body>
 </html>
